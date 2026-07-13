@@ -1,0 +1,151 @@
+# ============================================================
+# Olist ETL Pipeline - Docker Compose
+#
+# Services:
+#   airflow-db      Airflow's OWN metadata database (task state,
+#                    DAG runs, connections, etc.)
+#   warehouse-db    The SEPARATE PostgreSQL warehouse database
+#                    that the pipeline loads Gold tables into.
+#                    Per spec: "Do not use Airflow's PostgreSQL.
+#                    Use a separate warehouse database."
+#   airflow-init    One-off container that initializes the
+#                    Airflow DB and creates the admin user.
+#   airflow-webserver / airflow-scheduler
+#                    Airflow itself (LocalExecutor), running the
+#                    single DAG in dags/pipeline_DAG_.py.
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in real credentials
+#      (DB password, email app password, etc.)
+#   2. docker compose up airflow-init   (first time only)
+#   3. docker compose up -d
+#   4. Open http://localhost:8080 (default admin/admin, see
+#      airflow-init command below)
+# ============================================================
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: utc
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    # Project-level settings, read by config/config.py via
+    # python-dotenv. These override values from a mounted .env
+    # if both are present; keep them consistent with your .env.
+    PIPELINE_NAME: ${PIPELINE_NAME:-Olist_ETL_Pipeline}
+    RAW_DATA_PATH: data/raw
+    BRONZE_PATH: data/bronze
+    SILVER_PATH: data/silver
+    GOLD_PATH: data/gold
+    REJECTED_PATH: data/rejected
+    DB_HOST: warehouse-db
+    DB_PORT: 5432
+    DB_NAME: ${WAREHOUSE_DB_NAME:-warehouse_db}
+    DB_USER: ${WAREHOUSE_DB_USER:-warehouse}
+    DB_PASSWORD: ${WAREHOUSE_DB_PASSWORD:-warehouse_password}
+    METADATA_TABLE: pipeline_metadata
+    AUDIT_TABLE: pipeline_audit
+    EMAIL_SENDER: ${EMAIL_SENDER}
+    EMAIL_PASSWORD: ${EMAIL_PASSWORD}
+    EMAIL_RECEIVER: ${EMAIL_RECEIVER}
+    SMTP_SERVER: ${SMTP_SERVER:-smtp.gmail.com}
+    SMTP_PORT: ${SMTP_PORT:-587}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./pipeline:/opt/airflow/pipeline
+    - ./config:/opt/airflow/config
+    - ./sql:/opt/airflow/sql
+    - ./data:/opt/airflow/data
+    - ./logs:/opt/airflow/logs
+    - ./main.py:/opt/airflow/main.py
+  working_dir: /opt/airflow
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+    warehouse-db:
+      condition: service_healthy
+
+services:
+
+  # ----------------------------------------------------------
+  # Airflow's own metadata database (separate from the warehouse)
+  # ----------------------------------------------------------
+  airflow-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Separate warehouse database - Gold tables + pipeline_metadata
+  # get loaded here by postgres_loader.py / metadata.py
+  # ----------------------------------------------------------
+  warehouse-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${WAREHOUSE_DB_USER:-warehouse}
+      POSTGRES_PASSWORD: ${WAREHOUSE_DB_PASSWORD:-warehouse_password}
+      POSTGRES_DB: ${WAREHOUSE_DB_NAME:-warehouse_db}
+    ports:
+      - "5433:5432"   # host:container - avoids clashing with a local Postgres on 5432
+    volumes:
+      - warehouse-db-data:/var/lib/postgresql/data
+      - ./sql/create_tables.sql:/docker-entrypoint-initdb.d/01_create_tables.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${WAREHOUSE_DB_USER:-warehouse}"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      - airflow-init
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      - airflow-init
+    restart: unless-stopped
+
+volumes:
+  airflow-db-data:
+  warehouse-db-data:

@@ -1,0 +1,26 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Data (raw is fine to keep, but generated layers can get large)
+data/bronze/
+data/silver/
+data/gold/
+data/rejected/
+data/tmp/
+
+# Logs
+logs/*.log
+
+# Airflow
+logs/
+airflow.db
+airflow-webserver.pid
+
+# Editors
+.vscode/

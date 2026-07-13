@@ -1,0 +1,8 @@
+pandas
+numpy
+pyarrow
+sqlalchemy
+psycopg2-binary
+python-dotenv
+lxml
+openpyxl
