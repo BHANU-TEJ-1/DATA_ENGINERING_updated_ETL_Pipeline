@@ -6,3 +6,5 @@ psycopg2-binary
 python-dotenv
 lxml
 openpyxl
+pymysql
+apache-airflow-providers-fab

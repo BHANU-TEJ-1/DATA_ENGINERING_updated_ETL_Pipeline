@@ -1,10 +1,13 @@
 """
 Olist ETL Pipeline - Airflow DAG.
 
-Mirrors main.py's execution order exactly:
+Extraction is multi-source and runs in PARALLEL, then the rest of
+the pipeline mirrors main.py's execution order exactly:
 
-Extract -> Bronze -> Validation -> Silver -> Transformation ->
-SCD -> Gold -> PostgreSQL -> Metadata -> Email
+start_extraction -> [extract_csv, extract_json, extract_xml,
+extract_mysql] (parallel) -> merge_extraction -> Bronze ->
+Validation -> Silver -> Transformation -> SCD -> Gold ->
+PostgreSQL -> Metadata -> Email
 
 Each task is a separate process, so DataFrame dicts CANNOT be
 passed between tasks via XCom (Airflow's default XCom backend is
@@ -12,7 +15,10 @@ JSON-only and not meant for large data). Instead, each task hands
 its output to the next by pickling the dict of DataFrames to a
 scratch folder (data/tmp/) - the same pattern the pipeline already
 uses for the Bronze/Silver/Gold parquet layers, just for the
-in-between stages that don't have a named layer of their own.
+in-between stages that don't have a named layer of their own. The
+four extraction tasks each write their own pickle (csv.pkl,
+json.pkl, xml.pkl, mysql.pkl); merge_extraction combines them into
+raw.pkl, which Bronze reads exactly as before.
 Only small values (row counts, table names, run_id) travel through
 XCom.
 """
@@ -31,7 +37,17 @@ from airflow.operators.python import PythonOperator
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from pipeline.extraction import extract_data
+from config.config import MYSQL_CONNECTION_STRING
+from pipeline.extraction import (
+    get_csv_paths,
+    get_json_paths,
+    get_xml_paths,
+    get_mysql_tables,
+)
+from pipeline.ingestion.csv_ingestion import CSVIngestion
+from pipeline.ingestion.json_ingestion import JSONIngestion
+from pipeline.ingestion.xml_ingestion import XMLIngestion
+from pipeline.ingestion.mysql_ingestion import MySQLIngestion
 from pipeline.bronze import create_bronze_layer
 from pipeline.validation import validate_data
 from pipeline.silver import create_silver_layer
@@ -91,7 +107,12 @@ def _count_rejected() -> int:
 # Task callables
 # ----------------------------------------------------------------
 
-def extract_task(**context) -> None:
+def start_extraction_task(**context) -> None:
+    """
+    Runs once, before the four parallel extraction tasks: generates
+    the run_id, records the pipeline start time, and clears out the
+    rejected-records folder from any previous run.
+    """
     run_id = str(uuid.uuid4())
     context["ti"].xcom_push(key="run_id", value=run_id)
     context["ti"].xcom_push(
@@ -100,7 +121,47 @@ def extract_task(**context) -> None:
 
     _clear_rejected_folder()
 
-    raw_datasets = extract_data()
+
+def extract_csv_task(**context) -> None:
+    datasets = CSVIngestion().extract(get_csv_paths())
+    _save_stage("csv", datasets)
+
+
+def extract_json_task(**context) -> None:
+    datasets = JSONIngestion().extract(get_json_paths())
+    _save_stage("json", datasets)
+
+
+def extract_xml_task(**context) -> None:
+    datasets = XMLIngestion().extract(get_xml_paths())
+    _save_stage("xml", datasets)
+
+
+def extract_mysql_task(**context) -> None:
+    mysql_tables = get_mysql_tables()
+
+    raw = MySQLIngestion().extract(
+        MYSQL_CONNECTION_STRING, list(mysql_tables.keys())
+    )
+
+    datasets = {
+        canonical_name: raw[table_name]
+        for table_name, canonical_name in mysql_tables.items()
+    }
+    _save_stage("mysql", datasets)
+
+
+def merge_extraction_task(**context) -> None:
+    """
+    Runs after all four extraction tasks complete. Merges the four
+    pickled dicts into one and saves it as raw.pkl, exactly what
+    Bronze expects - the rest of the pipeline is unchanged.
+    """
+    raw_datasets: dict = {}
+
+    for stage_name in ("csv", "json", "xml", "mysql"):
+        raw_datasets.update(_load_stage(stage_name))
+
     _save_stage("raw", raw_datasets)
 
 
@@ -157,9 +218,9 @@ def postgres_task(**context) -> None:
 def metadata_task(**context) -> None:
     ti = context["ti"]
 
-    run_id = ti.xcom_pull(key="run_id", task_ids="extract")
+    run_id = ti.xcom_pull(key="run_id", task_ids="start_extraction")
     start_time = datetime.fromisoformat(
-        ti.xcom_pull(key="pipeline_start_time", task_ids="extract")
+        ti.xcom_pull(key="pipeline_start_time", task_ids="start_extraction")
     )
     records_processed = ti.xcom_pull(
         key="records_processed", task_ids="gold"
@@ -189,9 +250,9 @@ def metadata_task(**context) -> None:
 def email_task(**context) -> None:
     ti = context["ti"]
 
-    run_id = ti.xcom_pull(key="run_id", task_ids="extract")
+    run_id = ti.xcom_pull(key="run_id", task_ids="start_extraction")
     start_time = datetime.fromisoformat(
-        ti.xcom_pull(key="pipeline_start_time", task_ids="extract")
+        ti.xcom_pull(key="pipeline_start_time", task_ids="start_extraction")
     )
     end_time = datetime.fromisoformat(
         ti.xcom_pull(key="pipeline_end_time", task_ids="metadata")
@@ -236,9 +297,9 @@ def on_pipeline_failure(context) -> None:
     dag_run = context["dag_run"]
 
     try:
-        run_id = ti.xcom_pull(key="run_id", task_ids="extract") or "unknown"
+        run_id = ti.xcom_pull(key="run_id", task_ids="start_extraction") or "unknown"
         start_time_raw = ti.xcom_pull(
-            key="pipeline_start_time", task_ids="extract"
+            key="pipeline_start_time", task_ids="start_extraction"
         )
         start_time = (
             datetime.fromisoformat(start_time_raw)
@@ -303,9 +364,34 @@ with DAG(
     tags=["olist", "etl", "medallion"],
 ) as dag:
 
-    extract = PythonOperator(
-        task_id="extract",
-        python_callable=extract_task,
+    start_extraction = PythonOperator(
+        task_id="start_extraction",
+        python_callable=start_extraction_task,
+    )
+
+    extract_csv = PythonOperator(
+        task_id="extract_csv",
+        python_callable=extract_csv_task,
+    )
+
+    extract_json = PythonOperator(
+        task_id="extract_json",
+        python_callable=extract_json_task,
+    )
+
+    extract_xml = PythonOperator(
+        task_id="extract_xml",
+        python_callable=extract_xml_task,
+    )
+
+    extract_mysql = PythonOperator(
+        task_id="extract_mysql",
+        python_callable=extract_mysql_task,
+    )
+
+    merge_extraction = PythonOperator(
+        task_id="merge_extraction",
+        python_callable=merge_extraction_task,
     )
 
     bronze = PythonOperator(
@@ -353,8 +439,11 @@ with DAG(
         python_callable=email_task,
     )
 
+    start_extraction >> [extract_csv, extract_json, extract_xml, extract_mysql]
+
     (
-        extract
+        [extract_csv, extract_json, extract_xml, extract_mysql]
+        >> merge_extraction
         >> bronze
         >> validation
         >> silver

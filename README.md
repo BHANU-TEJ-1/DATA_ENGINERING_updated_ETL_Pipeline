@@ -6,7 +6,7 @@ orchestrated with Apache Airflow, loaded into PostgreSQL, and
 reported on by email.
 
 ```
-Raw CSV → Extraction → Bronze → Validation → Silver →
+CSV + JSON + XML + MySQL → Extraction (parallel) → Bronze → Validation → Silver →
 Transformation → SCD → Gold → PostgreSQL → Metadata → Email
 ```
 
@@ -16,7 +16,8 @@ Every file listed in the original spec now has real, tested logic:
 
 | File | Responsibility |
 |---|---|
-| `pipeline/extraction.py` | Reads every raw CSV into a dict of DataFrames |
+| `pipeline/ingestion/*.py` | CSVIngestion / JSONIngestion / XMLIngestion / MySQLIngestion - one class per source format, each just extracts |
+| `pipeline/extraction.py` | Maps each dataset to its source (file path or MySQL table) and orchestrates the four ingestion classes into one merged dict |
 | `pipeline/bronze.py` | Adds lineage columns, writes immutable Parquet |
 | `pipeline/validation.py` | Schema/PK/null/duplicate checks, rejects bad rows |
 | `pipeline/silver.py` | Cleans strings/dates/numerics, writes Parquet |
@@ -98,27 +99,38 @@ run those yourself** with your own credentials — see below.
 
 ## Option A — Run with Docker + Airflow (recommended, matches the spec)
 
+This runs Airflow 3 (new React UI), with **your own LOCAL
+PostgreSQL** as the warehouse - there is no warehouse database
+container. Make sure, before starting:
+
+- Your local PostgreSQL server is running and reachable on
+  `DB_PORT`, and the `DB_NAME` database already exists.
+- Your local MySQL server (`olist_db`, with `order_payments` /
+  `order_reviews`) is running and reachable on `MYSQL_PORT`.
+- `OLIST_SOURCE_DIR` in `.env` points at the folder containing
+  `customers.csv`, `geolocation.csv`, `orders.json`,
+  `order_items.json`, `products.xml`, `product_category_translation.xml`.
+- `AIRFLOW_JWT_SECRET` in `.env` is set to some long random string.
+
 ```bash
 docker compose up airflow-init      # first time only: creates admin/admin user
-docker compose up -d                # starts warehouse DB, airflow DB, webserver, scheduler
+docker compose up -d                # starts airflow's own DB, api-server, scheduler, dag-processor
 ```
 
 Open http://localhost:8080 (login `admin` / `admin`), find the
 `olist_etl_pipeline` DAG, and trigger it manually (▶ button). Watch
-the 10 tasks run in order: `extract → bronze → validation → silver
-→ transformation → scd → gold → postgres_load → metadata → email`.
+the tasks run: extraction fans out into 4 parallel tasks
+(`extract_csv`, `extract_json`, `extract_xml`, `extract_mysql`),
+which join at `merge_extraction`, then continue
+`bronze → validation → silver → transformation → scd → gold →
+postgres_load → metadata → email` exactly as before.
 
-The **warehouse database** (separate from Airflow's own metadata
-DB, per spec) is exposed on `localhost:5433` if you want to inspect
-it with a client:
-```
-host: localhost   port: 5433
-db:   warehouse_db (or your WAREHOUSE_DB_NAME)
-user: warehouse    (or your WAREHOUSE_DB_USER)
-```
+Containers reach your local Postgres/MySQL via
+`host.docker.internal` (built into Docker Desktop on Windows/Mac).
 
 To stop everything: `docker compose down` (add `-v` to also wipe
-the Postgres volumes and start clean next time).
+Airflow's own metadata DB volume and start clean next time - this
+does **not** touch your local Postgres warehouse data).
 
 ## Option B — Run locally without Docker/Airflow
 
@@ -148,8 +160,15 @@ Airflow.
   your normal Gmail password instead of an app password, or 2FA
   isn't enabled (required for app passwords).
 - **`psycopg2` / connection refused**: check `DB_HOST` — it should
-  be `warehouse-db` when running via Docker Compose, or `localhost`
-  when running `main.py` directly against a local Postgres.
+  be `host.docker.internal` when running via Docker Compose
+  (docker-compose.yml sets this for you automatically), or
+  `localhost` when running `main.py` directly against your local
+  Postgres. Same idea for `MYSQL_HOST`. Also make sure your local
+  Postgres/MySQL are configured to accept connections from Docker's
+  network, not just `127.0.0.1`.
+- **`ModuleNotFoundError: No module named 'pymysql'`**: rebuild the
+  image (`docker compose build`) — `pymysql` is required for
+  `MySQLIngestion` and lives in `requirements.txt`.
 - **DAG task fails and you get a failure email**: check
   `logs/pipeline.log` first, then the task's log in the Airflow UI —
   both show the same underlying exception.

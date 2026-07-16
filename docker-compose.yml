@@ -1,25 +1,40 @@
 # ============================================================
-# Olist ETL Pipeline - Docker Compose
+# Olist ETL Pipeline - Docker Compose (Airflow 3.x)
 #
 # Services:
-#   airflow-db      Airflow's OWN metadata database (task state,
-#                    DAG runs, connections, etc.)
-#   warehouse-db    The SEPARATE PostgreSQL warehouse database
-#                    that the pipeline loads Gold tables into.
-#                    Per spec: "Do not use Airflow's PostgreSQL.
-#                    Use a separate warehouse database."
-#   airflow-init    One-off container that initializes the
-#                    Airflow DB and creates the admin user.
-#   airflow-webserver / airflow-scheduler
-#                    Airflow itself (LocalExecutor), running the
-#                    single DAG in dags/pipeline_DAG_.py.
+#   airflow-db           Airflow's OWN metadata database (task
+#                          state, DAG runs, connections, etc.) -
+#                          NOT business data.
+#   airflow-init          One-off container that initializes the
+#                          Airflow DB and creates the admin user.
+#   airflow-api-server     Airflow 3's React-based UI + REST API
+#                          (replaces the old Flask "webserver").
+#   airflow-scheduler      Schedules + executes tasks (LocalExecutor).
+#   airflow-dag-processor  Parses DAG files (its own component as
+#                          of Airflow 3 - the scheduler no longer
+#                          parses DAGs itself).
+#
+# IMPORTANT - per spec, business data (Gold tables + pipeline
+# metadata) is loaded into the person's LOCAL PostgreSQL instance
+# on the Windows host, NOT into a Postgres container. There is
+# deliberately no "warehouse-db" service here. Containers reach the
+# host via `host.docker.internal` (built into Docker Desktop for
+# Windows/Mac; the extra_hosts entry below adds the same behaviour
+# on Linux). The MySQL source database (olist_db) is reached the
+# same way.
 #
 # Usage:
 #   1. Copy .env.example to .env and fill in real credentials
-#      (DB password, email app password, etc.)
-#   2. docker compose up airflow-init   (first time only)
-#   3. docker compose up -d
-#   4. Open http://localhost:8080 (default admin/admin, see
+#      (local Postgres password, MySQL password, email app
+#      password, source-file locations, etc.)
+#   2. Make sure your LOCAL PostgreSQL is running, reachable on
+#      DB_PORT, and the `warehouse_db` (or your DB_NAME) database
+#      already exists (create it once: `createdb warehouse_db`,
+#      or run sql/create_tables.sql against it - pandas will also
+#      create the Gold tables automatically on first load).
+#   3. docker compose up airflow-init   (first time only)
+#   4. docker compose up -d
+#   5. Open http://localhost:8080 (default admin/admin, see
 #      airflow-init command below)
 # ============================================================
 
@@ -27,33 +42,53 @@ x-airflow-common: &airflow-common
   build:
     context: .
     dockerfile: Dockerfile
+
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DEFAULT_TIMEZONE: utc
-    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-    # Project-level settings, read by config/config.py via
-    # python-dotenv. These override values from a mounted .env
-    # if both are present; keep them consistent with your .env.
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-api-server:8080/execution/"
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+
     PIPELINE_NAME: ${PIPELINE_NAME:-Olist_ETL_Pipeline}
-    RAW_DATA_PATH: data/raw
+
+    CUSTOMERS_PATH: /opt/airflow/source_data/CRM/customers.csv
+    GEOLOCATION_PATH: /opt/airflow/source_data/CRM/geolocation.csv
+
+    ORDERS_PATH: /opt/airflow/source_data/OMS/orders.json
+    ORDER_ITEMS_PATH: /opt/airflow/source_data/OMS/order_items.json
+
+    PRODUCTS_PATH: /opt/airflow/source_data/PIM/products.xml
+    PRODUCT_CATEGORY_TRANSLATION_PATH: /opt/airflow/source_data/PIM/product_category_translation.xml
+
     BRONZE_PATH: data/bronze
     SILVER_PATH: data/silver
     GOLD_PATH: data/gold
     REJECTED_PATH: data/rejected
-    DB_HOST: warehouse-db
-    DB_PORT: 5432
-    DB_NAME: ${WAREHOUSE_DB_NAME:-warehouse_db}
-    DB_USER: ${WAREHOUSE_DB_USER:-warehouse}
-    DB_PASSWORD: ${WAREHOUSE_DB_PASSWORD:-warehouse_password}
+
+    DB_HOST: host.docker.internal
+    DB_PORT: ${DB_PORT:-5432}
+    DB_NAME: ${DB_NAME:-warehouse_db}
+    DB_USER: ${DB_USER:-postgres}
+    DB_PASSWORD: ${DB_PASSWORD}
+
+    MYSQL_HOST: host.docker.internal
+    MYSQL_PORT: ${MYSQL_PORT:-3306}
+    MYSQL_DATABASE: ${MYSQL_DATABASE:-olist_db}
+    MYSQL_USER: ${MYSQL_USER:-root}
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+
     METADATA_TABLE: pipeline_metadata
     AUDIT_TABLE: pipeline_audit
+
     EMAIL_SENDER: ${EMAIL_SENDER}
     EMAIL_PASSWORD: ${EMAIL_PASSWORD}
     EMAIL_RECEIVER: ${EMAIL_RECEIVER}
     SMTP_SERVER: ${SMTP_SERVER:-smtp.gmail.com}
     SMTP_PORT: ${SMTP_PORT:-587}
+
   volumes:
     - ./dags:/opt/airflow/dags
     - ./pipeline:/opt/airflow/pipeline
@@ -62,17 +97,22 @@ x-airflow-common: &airflow-common
     - ./data:/opt/airflow/data
     - ./logs:/opt/airflow/logs
     - ./main.py:/opt/airflow/main.py
+    - "${OLIST_SOURCE_DIR}:/opt/airflow/source_data:ro"
+
   working_dir: /opt/airflow
+
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
   depends_on:
     airflow-db:
-      condition: service_healthy
-    warehouse-db:
       condition: service_healthy
 
 services:
 
   # ----------------------------------------------------------
-  # Airflow's own metadata database (separate from the warehouse)
+  # Airflow's own metadata database (task state / DAG runs only -
+  # business data never goes here, see header comment above).
   # ----------------------------------------------------------
   airflow-db:
     image: postgres:15
@@ -84,27 +124,6 @@ services:
       - airflow-db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
-      interval: 5s
-      retries: 10
-    restart: unless-stopped
-
-  # ----------------------------------------------------------
-  # Separate warehouse database - Gold tables + pipeline_metadata
-  # get loaded here by postgres_loader.py / metadata.py
-  # ----------------------------------------------------------
-  warehouse-db:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: ${WAREHOUSE_DB_USER:-warehouse}
-      POSTGRES_PASSWORD: ${WAREHOUSE_DB_PASSWORD:-warehouse_password}
-      POSTGRES_DB: ${WAREHOUSE_DB_NAME:-warehouse_db}
-    ports:
-      - "5433:5432"   # host:container - avoids clashing with a local Postgres on 5432
-    volumes:
-      - warehouse-db-data:/var/lib/postgresql/data
-      - ./sql/create_tables.sql:/docker-entrypoint-initdb.d/01_create_tables.sql
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${WAREHOUSE_DB_USER:-warehouse}"]
       interval: 5s
       retries: 10
     restart: unless-stopped
@@ -125,9 +144,9 @@ services:
           --email admin@example.com
     restart: "no"
 
-  airflow-webserver:
+  airflow-api-server:
     <<: *airflow-common
-    command: webserver
+    command: api-server
     ports:
       - "8080:8080"
     depends_on:
@@ -144,8 +163,16 @@ services:
     command: scheduler
     depends_on:
       - airflow-init
+      - airflow-api-server
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      - airflow-init
+      - airflow-api-server
     restart: unless-stopped
 
 volumes:
   airflow-db-data:
-  warehouse-db-data:

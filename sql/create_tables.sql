@@ -1,7 +1,11 @@
 -- ============================================================
 -- Olist ETL Pipeline - Warehouse DDL
--- Target: a SEPARATE PostgreSQL database (NOT Airflow's own
--- metadata DB). See docker-compose.yml (service: warehouse-db).
+-- Target: your LOCAL PostgreSQL instance (NOT Airflow's own
+-- metadata DB, and NOT a Docker container - see docker-compose.yml,
+-- which connects out to host.docker.internal:DB_PORT instead of
+-- running its own warehouse Postgres container). Run this manually
+-- with e.g. `psql -h localhost -U postgres -d warehouse_db -f
+-- sql/create_tables.sql` if you want the schema pre-created.
 --
 -- Note: postgres_loader.py loads Gold tables with
 -- if_exists="replace", so SQLAlchemy/pandas will (re)create
