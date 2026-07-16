@@ -56,6 +56,7 @@ x-airflow-common: &airflow-common
 
     CUSTOMERS_PATH: /opt/airflow/source_data/CRM/customers.csv
     GEOLOCATION_PATH: /opt/airflow/source_data/CRM/geolocation.csv
+    SELLERS_PATH: /opt/airflow/source_data/CRM/olist_sellers_dataset.csv
 
     ORDERS_PATH: /opt/airflow/source_data/OMS/orders.json
     ORDER_ITEMS_PATH: /opt/airflow/source_data/OMS/order_items.json

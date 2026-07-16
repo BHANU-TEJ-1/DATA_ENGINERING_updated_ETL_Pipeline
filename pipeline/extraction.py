@@ -27,9 +27,9 @@ This module does two things:
 import pandas as pd
 
 from config.config import (
-    BASE_DIR,
     CUSTOMERS_PATH,
     GEOLOCATION_PATH,
+    SELLERS_PATH,
     ORDERS_PATH,
     ORDER_ITEMS_PATH,
     PRODUCTS_PATH,
@@ -51,14 +51,13 @@ logger = get_logger(__name__)
 # under data/raw, exactly as it already was, since the downstream
 # Silver/Gold layers still require "olist_sellers_dataset".
 # ------------------------------------------------------------------
-SELLERS_PATH = BASE_DIR / "data" / "raw" / "olist_sellers_dataset.csv"
 
 
 def get_csv_paths() -> dict[str, str]:
     return {
         "olist_customers_dataset": CUSTOMERS_PATH,
         "olist_geolocation_dataset": GEOLOCATION_PATH,
-        "olist_sellers_dataset": str(SELLERS_PATH),
+        "olist_sellers_dataset": SELLERS_PATH,
     }
 
 

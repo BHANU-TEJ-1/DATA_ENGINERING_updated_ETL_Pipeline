@@ -29,6 +29,7 @@ def load_to_postgres(gold_tables: dict) -> None:
                 con=engine,
                 if_exists="replace",
                 index=False,
+                chunksize=5000,
                 method="multi",
             )
 
@@ -40,7 +41,7 @@ def load_to_postgres(gold_tables: dict) -> None:
 
     except Exception as e:
 
-        logger.error(f"Database Load Failed : {e}")
+        logger.error(f"Database Load Failed: {e}")
 
         raise
 
