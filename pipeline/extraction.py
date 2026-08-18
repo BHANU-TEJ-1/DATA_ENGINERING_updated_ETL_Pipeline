@@ -1,8 +1,7 @@
 """
 Multi-Source Extraction Orchestrator.
 
-The old CSV-only extraction.py has been removed. Extraction now goes
-through four dedicated ingestion classes (pipeline/ingestion/):
+Extraction now goes through four dedicated ingestion classes (pipeline/ingestion/):
 
     CSVIngestion   -> customers, geolocation, sellers
     JSONIngestion  -> orders, order_items

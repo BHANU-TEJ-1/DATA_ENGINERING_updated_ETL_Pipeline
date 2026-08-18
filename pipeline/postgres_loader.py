@@ -29,7 +29,7 @@ def load_to_postgres(gold_tables: dict) -> None:
                 con=engine,
                 if_exists="replace",
                 index=False,
-                chunksize=5000,
+                chunksize=20000,
                 method="multi",
             )
 

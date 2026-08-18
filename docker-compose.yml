@@ -68,7 +68,7 @@ x-airflow-common: &airflow-common
     SILVER_PATH: data/silver
     GOLD_PATH: data/gold
     REJECTED_PATH: data/rejected
-
+    #local postgres connection
     DB_HOST: host.docker.internal
     DB_PORT: ${DB_PORT:-5432}
     DB_NAME: ${DB_NAME:-warehouse_db}
