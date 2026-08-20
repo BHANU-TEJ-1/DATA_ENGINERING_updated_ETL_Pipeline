@@ -229,24 +229,11 @@ def on_pipeline_failure(context) -> None:
 
     try:
 
-        run_id = (
-            ti.xcom_pull(
-                key="run_id",
-                task_ids="start_extraction",
-            )
-            or "unknown"
-        )
+        run_id = (ti.xcom_pull(key="run_id",task_ids="start_extraction",)or "unknown")
 
-        start_time_raw = ti.xcom_pull(
-            key="pipeline_start_time",
-            task_ids="start_extraction",
-        )
+        start_time_raw = ti.xcom_pull(key="pipeline_start_time",task_ids="start_extraction",)
 
-        start_time = (
-            datetime.fromisoformat(start_time_raw)
-            if start_time_raw
-            else dag_run.start_date
-        )
+        start_time = (datetime.fromisoformat(start_time_raw)if start_time_raw else dag_run.start_date)
 
     except Exception:
 
@@ -257,10 +244,7 @@ def on_pipeline_failure(context) -> None:
 
     records_rejected = _count_rejected()
 
-    error = context.get(
-        "exception",
-        "Unknown error",
-    )
+    error = context.get("exception","Unknown error",)
 
     # --------------------------------------------------------
     # Save failure metadata
@@ -366,15 +350,9 @@ def olist_etl_pipeline():
 
         run_id = str(uuid.uuid4())
 
-        ti.xcom_push(
-            key="run_id",
-            value=run_id,
-        )
+        ti.xcom_push(key="run_id",value=run_id,)
 
-        ti.xcom_push(
-            key="pipeline_start_time",
-            value=datetime.now().isoformat(),
-        )
+        ti.xcom_push(key="pipeline_start_time",value=datetime.now().isoformat(),)
 
         _clear_rejected_folder()
 
@@ -388,14 +366,8 @@ def olist_etl_pipeline():
     )
     def extract_csv():
 
-        datasets = CSVIngestion().extract(
-            get_csv_paths()
-        )
-
-        _save_stage(
-            "csv",
-            datasets,
-        )
+        datasets = CSVIngestion().extract(get_csv_paths())
+        _save_stage("csv",datasets,)
 
 
     # ========================================================
@@ -407,14 +379,8 @@ def olist_etl_pipeline():
     )
     def extract_json():
 
-        datasets = JSONIngestion().extract(
-            get_json_paths()
-        )
-
-        _save_stage(
-            "json",
-            datasets,
-        )
+        datasets = JSONIngestion().extract(get_json_paths())
+        _save_stage("json",datasets,)
 
 
     # ========================================================
@@ -426,23 +392,15 @@ def olist_etl_pipeline():
     )
     def extract_xml():
 
-        datasets = XMLIngestion().extract(
-            get_xml_paths()
-        )
-
-        _save_stage(
-            "xml",
-            datasets,
-        )
+        datasets = XMLIngestion().extract(get_xml_paths())
+        _save_stage("xml",datasets,)
 
 
     # ========================================================
     # PARALLEL MYSQL EXTRACTION
     # ========================================================
 
-    @task(
-        task_id="extract_mysql"
-    )
+    @task(task_id="extract_mysql")
     def extract_mysql():
 
         mysql_tables = get_mysql_tables()
@@ -458,19 +416,14 @@ def olist_etl_pipeline():
             in mysql_tables.items()
         }
 
-        _save_stage(
-            "mysql",
-            datasets,
-        )
+        _save_stage("mysql",datasets,)
 
 
     # ========================================================
     # MERGE EXTRACTION
     # ========================================================
 
-    @task(
-        task_id="merge_extraction"
-    )
+    @task(task_id="merge_extraction")
     def merge_extraction():
 
         """
@@ -490,137 +443,79 @@ def olist_etl_pipeline():
 
         raw_datasets: dict = {}
 
-        for stage_name in (
-            "csv",
-            "json",
-            "xml",
-            "mysql",
-        ):
+        for stage_name in ("csv","json","xml","mysql",):
 
-            raw_datasets.update(
-                _load_stage(stage_name)
-            )
+            raw_datasets.update(_load_stage(stage_name))
 
-        _save_stage(
-            "raw",
-            raw_datasets,
-        )
+        _save_stage("raw",raw_datasets,)
 
 
     # ========================================================
     # BRONZE
     # ========================================================
 
-    @task(
-        task_id="bronze"
-    )
+    @task(task_id="bronze")
     def bronze():
 
-        raw_datasets = _load_stage(
-            "raw"
-        )
+        raw_datasets = _load_stage("raw")
 
-        bronze_datasets = create_bronze_layer(
-            raw_datasets
-        )
+        bronze_datasets = create_bronze_layer(raw_datasets)
 
-        _save_stage(
-            "bronze",
-            bronze_datasets
-        )
+        _save_stage("bronze",bronze_datasets)
 
 
     # ========================================================
     # VALIDATION
     # ========================================================
 
-    @task(
-        task_id="validation"
-    )
+    @task(task_id="validation")
     def validation():
+        bronze_datasets = _load_stage("bronze")
 
-        bronze_datasets = _load_stage(
-            "bronze"
-        )
+        validated_datasets = validate_data(bronze_datasets)
 
-        validated_datasets = validate_data(
-            bronze_datasets
-        )
-
-        _save_stage(
-            "validated",
-            validated_datasets
-        )
+        _save_stage("validated",validated_datasets)
 
 
     # ========================================================
     # SILVER
     # ========================================================
 
-    @task(
-        task_id="silver"
-    )
+    @task(task_id="silver")
     def silver():
 
-        validated_datasets = _load_stage(
-            "validated"
-        )
+        validated_datasets = _load_stage("validated")
 
-        silver_datasets = create_silver_layer(
-            validated_datasets
-        )
+        silver_datasets = create_silver_layer(validated_datasets)
 
-        _save_stage(
-            "silver",
-            silver_datasets
-        )
+        _save_stage("silver",silver_datasets)
 
 
     # ========================================================
     # BUSINESS TRANSFORMATION
     # ========================================================
 
-    @task(
-        task_id="transformation"
-    )
+    @task(task_id="transformation")
     def transformation():
 
-        silver_datasets = _load_stage(
-            "silver"
-        )
+        silver_datasets = _load_stage("silver")
 
-        transformed_data = create_business_layer(
-            silver_datasets
-        )
+        transformed_data = create_business_layer(silver_datasets)
 
-        _save_stage(
-            "transformed",
-            transformed_data
-        )
+        _save_stage("transformed",transformed_data)
 
 
     # ========================================================
     # SCD
     # ========================================================
 
-    @task(
-        task_id="scd"
-    )
+    @task(task_id="scd")
     def scd():
+        transformed_data = _load_stage("transformed")
 
-        transformed_data = _load_stage(
-            "transformed"
-        )
+        transformed_data = apply_scd(transformed_data)
 
-        transformed_data = apply_scd(
-            transformed_data
-        )
-
-        _save_stage(
-            "scd",
-            transformed_data
-        )
-
+        _save_stage("scd",transformed_data)
 
     # ========================================================
     # GOLD
